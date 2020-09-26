@@ -19,19 +19,99 @@ const int stepPin = 12;
 
 #define MIN_ENDSTOP_PIN 33
 #define MAX_ENDSTOP_PIN 32
+#define TRAVEL_SPEED 10000
+#define REFINEMENT_SPEED 1000
 
 // Define motor interface type
 #define motorInterfaceType 1
 
 // Creates an instance
 AccelStepper myStepper(motorInterfaceType, stepPin, dirPin);
-int target = 10000;
-int maxPosition = 10000000; //arbitrarily large endstop number;
+int targetPosition = 0;
+int maxPosition = 0; //arbitrarily large endstop number;
+unsigned long debounceDelay = 50;    // the debounce time; increase if the output flickers
+bool endstopsSet = false;
+long travelTimeInSecs = 0;
+int distancePercentage = 100;
+int playSpeed = 0;
+bool stopped = true;
+bool play = false;
+bool rightToLeft = false;
+bool durationSet = false;
+bool distanceSet = false;
+bool sendHome = false;
+bool continuous = false;
+
+BLYNK_CONNECTED() {
+  Blynk.virtualWrite(V0, 0);
+  Blynk.virtualWrite(V1, 0);
+  Blynk.virtualWrite(V2, distancePercentage);
+  Blynk.virtualWrite(V3, 2);
+  Blynk.virtualWrite(V4, 1);
+  Blynk.virtualWrite(V5, 1);
+  //Blynk.syncAll();
+    
+}
+
+BLYNK_WRITE(V0) {
+  if(param[0]){
+    Serial.println("Homing Gantry");
+    Blynk.virtualWrite(V0, 1);
+    homeGantry();
+    Blynk.virtualWrite(V0, 0);
+  }
+}
 
 BLYNK_WRITE(V1) {
-  long startTimeInSecs = param[0].asLong();
-  Serial.println(startTimeInSecs);
+  travelTimeInSecs = param[0].asLong();
+  Serial.print("Travel Time: ");
+  Serial.print(travelTimeInSecs);
   Serial.println();
+  Blynk.virtualWrite(V1, travelTimeInSecs);
+  if(travelTimeInSecs > 0){
+    durationSet = true;
+  }
+}
+
+BLYNK_WRITE(V2) {
+  distancePercentage = param[0];
+  Serial.print("Distance Percentage: ");
+  Serial.print(distancePercentage);
+  Serial.println();
+  Blynk.virtualWrite(V2, distancePercentage);
+  if(distancePercentage > 0){
+    distanceSet = true;
+  }
+}
+
+BLYNK_WRITE(V3) {
+  if(param[0] == 1){
+    rightToLeft = true;
+  }else{
+    rightToLeft = false;
+  }
+  stopSlider();
+}
+
+BLYNK_WRITE(V4){
+  if(!durationSet || !distanceSet){
+    Blynk.virtualWrite(V4, 1);
+  }
+  
+  if(param[0] == 1){
+    stopSlider();
+  }else if(param[0] == 2){
+    pauseSlider();
+  }else{
+    playSlider();
+  }
+}
+
+BLYNK_WRITE(V5){
+  continuous = false;
+  if(param[0] == 2){
+     continuous = true;
+  }
 }
 
 void setup()
@@ -56,87 +136,137 @@ void setup()
   myStepper.setMaxSpeed(10000);
   myStepper.setAcceleration(1000);
   myStepper.setSpeed(1000);
-  setEndstops();
-  myStepper.stop();
-  myStepper.moveTo(0);
 }
 
 void loop()
 {
   //handle endstop pins
   Blynk.run();
-  if(myStepper.currentPosition() == 0){
+  if(sendHome){
+    if(myStepper.targetPosition() == myStepper.currentPosition()){
+      sendHome = false;
+    }else if(myStepper.targetPosition() > myStepper.currentPosition()){
+      myStepper.setSpeed(-1 * TRAVEL_SPEED);
+    }else{
+      myStepper.setSpeed(TRAVEL_SPEED);
+    }
+    myStepper.runSpeedToPosition();
+  }
+
+  if(play){
+    if(myStepper.targetPosition() == myStepper.currentPosition()){
+      //If Continuous, flip the target and return
+      if(continuous){
+        stopped = true;
+        if(rightToLeft){
+          rightToLeft = false;
+        }else{
+          rightToLeft = true;
+        }
+        playSlider();
+      }else{
+        stopSlider();
+      }
+    }
+    myStepper.runSpeed();
+  }
+}
+
+void homeGantry(){
+  if(!endstopsSet){
+    setEndstops();
+  }
+  sendHome = true;
+  if(rightToLeft){
     myStepper.moveTo(maxPosition);
-  }else if(myStepper.currentPosition() == maxPosition){
+  }else{
     myStepper.moveTo(0);
   }
-  myStepper.setSpeed(2000);
-  myStepper.runSpeedToPosition();
+}
+
+void stopSlider(){
+  stopped = true;
+  play = false;
+  Blynk.virtualWrite(V4, 1);
+  homeGantry();
+}
+
+void playSlider(){
+  if(stopped){
+    targetPosition = maxPosition * (distancePercentage / 100.0);
+    playSpeed = targetPosition / travelTimeInSecs;
+
+    if(rightToLeft){
+      targetPosition = maxPosition - targetPosition;
+      playSpeed = -1 * playSpeed;
+    }
+
+    myStepper.moveTo(targetPosition);
+    myStepper.setSpeed(playSpeed);
+    delay(3000);
+  }
+  Blynk.virtualWrite(V4, 3);
+  
+  stopped = false;
+  play = true;
+}
+
+void pauseSlider(){
+  play = false;
+  Blynk.virtualWrite(V4, 2);
 }
 
 void setEndstops(){
-  setMinEndstop();
-  setMaxEndstop();
-}
-
-//Might need to switch the direction of these functions
-void setMinEndstop(){
-  myStepper.setSpeed(-2000);
-  while(digitalRead(MIN_ENDSTOP_PIN) == HIGH){
-    myStepper.runSpeed();
-  }
-  
-  myStepper.setCurrentPosition(0); //Set the current position to 0 for now
-  myStepper.moveTo(200); //One rotation backwards
-
-  //Move back one rotation
-  while(myStepper.distanceToGo() != 0){
-    myStepper.run();
-  }
-
-  myStepper.setSpeed(-1000); //Reduce the speed by 50%;
-
-  while(digitalRead(MIN_ENDSTOP_PIN) == HIGH){
-//    Serial.println("moving to min again");
-    myStepper.runSpeed();
-  }
-
+  Serial.println("Setting Endstops");
+  setEndstop(-TRAVEL_SPEED, -REFINEMENT_SPEED, MIN_ENDSTOP_PIN);
   myStepper.setCurrentPosition(0);
   Serial.println("Setting current position to 0");
   Serial.println(myStepper.currentPosition());
+
+  setEndstop(TRAVEL_SPEED, REFINEMENT_SPEED, MAX_ENDSTOP_PIN);
+  maxPosition = myStepper.currentPosition();
+  Serial.print("Max Position 1: ");
+  Serial.println(myStepper.currentPosition());
+
+  endstopsSet = true;
 }
 
-void setMaxEndstop(){
-  //TODO move the gantry towards the far end until the endstop is hit
-  //TODO move back a certain number of steps
-  //TODO slow down and move back until triggered again
-  myStepper.setSpeed(2000);
-  while(digitalRead(MAX_ENDSTOP_PIN) == HIGH){
-//    Serial.println("moving to max");
+void setEndstop(int travelSpeed, int refinementSpeed, int pin){
+  int lastButtonState = HIGH;
+  unsigned long lastDebounceTime = 0;  // the last time the output pin was toggled
+  myStepper.setSpeed(travelSpeed);
+  while((millis() - lastDebounceTime) > debounceDelay){
+    int reading = digitalRead(pin);
+    // If the switch changed, due to noise or pressing:
+    if (reading != lastButtonState) {
+      // reset the debouncing timer
+      lastDebounceTime = millis();
+    }
     myStepper.runSpeed();
   }
-  
-  maxPosition = myStepper.currentPosition(); //Set the maxPosition to the current position of the stepper.
-  Serial.print("Max Position 1: ");
-  Serial.println(maxPosition);
-  myStepper.moveTo(myStepper.currentPosition()-200); //One rotation backwards
-  Serial.print("Target: ");
-  Serial.println(myStepper.targetPosition());
+
+  if(pin == MAX_ENDSTOP_PIN){
+    maxPosition = myStepper.currentPosition(); //Set the maxPosition to the current position of the stepper.
+    myStepper.moveTo(myStepper.currentPosition()-200); //One rotation backwards
+  }else{
+    myStepper.setCurrentPosition(0); //Set the current position to 0 for now
+    myStepper.moveTo(200); //One rotation backwards
+  }
 
   //Move back one rotation
-  Serial.println(myStepper.distanceToGo());
   while(myStepper.distanceToGo() != 0){
     myStepper.run();
   }
 
-  myStepper.setSpeed(1000); //Reduce the speed by 50%;
+  myStepper.setSpeed(refinementSpeed); //Reduce the speed;
 
-  while(digitalRead(MAX_ENDSTOP_PIN) == HIGH){
-//    Serial.println("moving to max again");
+  while((millis() - lastDebounceTime) > debounceDelay){
+    int reading = digitalRead(pin);
+    // If the switch changed, due to noise or pressing:
+    if (reading != lastButtonState) {
+      // reset the debouncing timer
+      lastDebounceTime = millis();
+    }
     myStepper.runSpeed();
   }
-
-  maxPosition = myStepper.currentPosition();
-  Serial.print("Max Position 1: ");
-  Serial.println(myStepper.currentPosition());
 }
